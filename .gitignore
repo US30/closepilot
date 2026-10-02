@@ -1,0 +1,6 @@
+data/raw/
+data/raw_eval/
+data/*.duckdb*
+.env
+__pycache__/
+.pytest_cache/

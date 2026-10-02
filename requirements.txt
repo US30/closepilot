@@ -1,0 +1,17 @@
+pandas
+numpy
+duckdb
+faker
+rapidfuzz
+scikit-learn
+statsforecast
+langgraph
+langchain-google-genai
+pydantic
+fastapi
+uvicorn
+streamlit
+plotly
+python-dotenv
+pytest
+tabulate
