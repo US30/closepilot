@@ -5,7 +5,7 @@ import duckdb
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from closepilot import db, graph
+from closepilot import db, graph, rag
 from closepilot.agents import copilot
 
 app = FastAPI(title="ClosePilot")
@@ -65,3 +65,8 @@ def ask(q: Question):
     r = copilot.ask(con(), q.question)
     return dict(ok=r["ok"], error=r["error"], sql=r["sql"], answer=r["answer"],
                 rows=None if r["df"] is None else r["df"].to_dict("records"))
+
+
+@app.post("/policy")
+def policy(q: Question):
+    return rag.answer(con(), q.question)

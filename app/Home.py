@@ -10,7 +10,7 @@ import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from closepilot import db, graph, llm, roi  # noqa: E402
+from closepilot import db, graph, llm, rag, roi  # noqa: E402
 from closepilot.agents import copilot  # noqa: E402
 from data.generate import generate  # noqa: E402
 
@@ -28,7 +28,10 @@ def get_con():
 
 
 con = get_con()
-has_run = "run_summary" in {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+has_run = "run_summary" in tables
+if has_run and "policy_citations" not in tables:  # database from a run made before the policy layer existed
+    rag.cite_queue(con, hybrid=True)
 inr = lambda x: f"₹{x/1e5:,.1f} L" if abs(x) < 1e7 else f"₹{x/1e7:,.2f} Cr"  # noqa: E731
 
 st.title("ClosePilot — agentic month-end close copilot")
@@ -51,8 +54,8 @@ if not has_run:
     st.stop()
 
 kp = json.loads(con.execute("SELECT kpis FROM run_summary").fetchone()[0])
-t_over, t_rec, t_ap, t_grc, t_cash, t_chat, t_q = st.tabs(
-    ["Overview", "Reconciliation", "AP checks", "Controls", "Cash forecast", "CFO copilot", "Approval queue"])
+t_over, t_rec, t_ap, t_grc, t_cash, t_chat, t_pol, t_q = st.tabs(
+    ["Overview", "Reconciliation", "AP checks", "Controls", "Cash forecast", "CFO copilot", "Policy Q&A", "Approval queue"])
 
 with t_over:
     recon_df = con.execute("SELECT * FROM recon_matches").df()
@@ -103,8 +106,20 @@ with t_chat:
             if r["sql"]:
                 st.code(r["sql"], language="sql")
 
+with t_pol:
+    pq = st.text_input("Ask about policy or the vendor contract", "Can we pay an invoice before the goods are received?")
+    if st.button("Search policy") and pq:
+        r = rag.answer(con, pq)
+        if r["answer"]:
+            st.write(r["answer"])
+            st.caption("Cited: " + (", ".join(r["citations"]) or "none"))
+        for s in r["sources"]:
+            with st.expander(f"{s['clause']} {s['title']} · {s['doc']} ({s['retrieval']} retrieval)"):
+                st.write(s["text"])
+
 with t_q:
-    qdf = con.execute("SELECT item_id, agent, kind, summary, exposure_inr, confidence, status FROM approval_queue "
+    qdf = con.execute("SELECT q.item_id, agent, kind, summary, c.clause || ' ' || c.title AS policy, exposure_inr, "
+                      "confidence, status FROM approval_queue q LEFT JOIN policy_citations c USING (item_id) "
                       "ORDER BY status='pending' DESC, exposure_inr DESC").df()
     f1, f2 = st.columns(2)
     agent = f1.multiselect("Agent", sorted(qdf.agent.unique()), default=list(qdf.agent.unique()))

@@ -1,6 +1,7 @@
 """Score every agent against the generator's ground truth. Writes eval/report.md.
 
-Usage: python eval/run_eval.py [--seed 42] [--no-llm]
+Usage: python eval/run_eval.py [--seed 42] [--no-llm] [--start N]
+--start N scores text-to-SQL from gold question N on, to finish a run the free-tier quota cut short.
 """
 import argparse
 import sys
@@ -12,9 +13,10 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd  # noqa: E402
 
-from closepilot import db, llm  # noqa: E402
+from closepilot import db, llm, rag  # noqa: E402
 from closepilot.agents import ap, copilot, forecast, grc, recon  # noqa: E402
 from data.generate import generate  # noqa: E402
+from eval.gold_policy import KIND_CLAUSE, QUESTIONS  # noqa: E402
 from eval.gold_sql import GOLD  # noqa: E402
 
 
@@ -29,7 +31,23 @@ def norm(df: pd.DataFrame):
     return sorted(tuple(round(v, 2) if isinstance(v, float) else str(v) for v in row) for row in df.itertuples(index=False))
 
 
-def main(seed: int, use_llm: bool):
+def policy_rows(con, hybrid: bool) -> dict:
+    """Retrieval quality on the gold questions, and whether each queue finding kind gets a correct clause."""
+    ranks = []
+    for q, gold in QUESTIONS:
+        got = [s["clause"] for s in rag.search(q, 5, con, hybrid)]
+        ranks.append(next((i for i, c in enumerate(got, 1) if c in gold), None))
+    rag.cite_queue(con, hybrid)
+    kinds = con.execute("SELECT DISTINCT q.kind, c.clause, c.retrieval FROM approval_queue q "
+                        "JOIN policy_citations c USING (item_id)").fetchall()
+    n = len(QUESTIONS)
+    return dict(retrieval=kinds[0][2], questions=n, hit_at_1=f"{sum(r == 1 for r in ranks)}/{n}",
+                hit_at_3=f"{sum(bool(r and r <= 3) for r in ranks)}/{n}",
+                mrr=round(sum(1 / r for r in ranks if r) / n, 3),
+                queue_kinds_cited_correctly=f"{sum(c in KIND_CLAUSE.get(k, ()) for k, c, _ in kinds)}/{len(kinds)}")
+
+
+def main(seed: int, use_llm: bool, start: int = 1):
     raw = ROOT / "data" / "raw_eval"
     generate(seed, raw)
     con = db.connect(":memory:")
@@ -62,12 +80,27 @@ def main(seed: int, use_llm: bool):
             f"\nSelected: receipts={f['facts']['model_receipts']}, payments={f['facts']['model_payments']}. "
             "Selection uses the same holdout, so the selected WAPE is optimistic.\n"]
 
+    recon.enqueue_exceptions(con, r["exceptions"])
+    ap.enqueue_findings(con, a)
+    grc.enqueue_flags(con, g)
+    rows = [policy_rows(con, hybrid=False)]
+    if use_llm and llm.available():
+        rows.append(policy_rows(con, hybrid=True))
+    out += [f"## Policy RAG ({len(rag.chunks())} clauses, {len(QUESTIONS)} gold questions)\n",
+            pd.DataFrame(rows).to_markdown(index=False),
+            "\nlexical = TF-IDF only (offline). hybrid = TF-IDF + Gemini embeddings, reciprocal rank fusion. "
+            "A row labelled lexical in a run with the LLM on means the embedding API failed. "
+            "The policy documents and the gold questions were written by the same author, so this is a sanity check.\n"]
+
     out.append("## Text-to-SQL (25 gold questions)\n")
     bad_ref = [q for q, sql in GOLD if _fails(con, sql)]
     out.append(f"- Reference SQL executes: {len(GOLD) - len(bad_ref)}/{len(GOLD)}")
     if use_llm and llm.available():
         strict = lenient = errored = streak = 0
-        for n, (q, sql) in enumerate(GOLD, 1):
+        todo = list(enumerate(GOLD, 1))[start - 1:]
+        tried = 0
+        for n, (q, sql) in todo:
+            tried += 1
             res = copilot.ask(con, q, summarize=False)
             if not res["ok"] and res["error"] == "LLM unavailable":  # API failure, not a wrong answer
                 errored += 1
@@ -87,8 +120,8 @@ def main(seed: int, use_llm: bool):
             print(f"[{n:02d}/{len(GOLD)}] {'PASS' if s_hit else ('PASS(lenient)' if l_hit else 'FAIL')} {q}"
                   + ("" if l_hit else f"  -> {res['error'] or res['sql']}"), flush=True)
             time.sleep(1)
-        answered = n - errored if n else 0
-        out.append(f"- Model: `{llm._model().model}`; questions answered by API: {answered}/{len(GOLD)} ({errored} API errors)")
+        answered = tried - errored
+        out.append(f"- Model: `{llm._model().model}`; questions {start}-{len(GOLD)}; answered by API: {answered}/{len(todo)} ({errored} API errors)")
         out.append(f"- Strict result-set accuracy (answered): **{strict}/{answered}**")
         out.append(f"- Lenient (extra columns allowed): **{lenient}/{answered}**")
         if llm.last_error:
@@ -111,5 +144,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-llm", action="store_true")
+    p.add_argument("--start", type=int, default=1)
     a = p.parse_args()
-    main(a.seed, not a.no_llm)
+    main(a.seed, not a.no_llm, a.start)

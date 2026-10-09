@@ -1,4 +1,4 @@
-"""LangGraph orchestrator: recon -> ap -> grc -> forecast -> queue -> roi. Results persist to DuckDB."""
+"""LangGraph orchestrator: recon -> ap -> grc -> forecast -> queue -> policy -> roi. Results persist to DuckDB."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from closepilot import db, roi
+from closepilot import db, rag, roi
 from closepilot.agents import ap, forecast, grc, recon
 
 
@@ -16,6 +16,7 @@ class State(TypedDict, total=False):
     grc: Any
     forecast: dict
     queued: dict
+    cited: int
     kpis: dict
 
 
@@ -38,6 +39,9 @@ def build_graph(con, use_llm: bool = True):
                  ap=ap.enqueue_findings(con, s["ap"]), grc=grc.enqueue_flags(con, s["grc"]))
         return {"queued": q}
 
+    def n_policy(s: State):
+        return {"cited": rag.cite_queue(con, hybrid=True)}  # embeddings whenever a key is set, else TF-IDF
+
     def n_roi(s: State):
         k = roi.compute(con, s["recon"], s["ap"], s["grc"], s["forecast"])
         _persist(con, s, k)
@@ -45,10 +49,11 @@ def build_graph(con, use_llm: bool = True):
 
     g = StateGraph(State)
     for name, fn in [("recon", n_recon), ("ap", n_ap), ("grc", n_grc), ("forecast", n_forecast),
-                     ("queue", n_queue), ("roi", n_roi)]:
+                     ("queue", n_queue), ("policy", n_policy), ("roi", n_roi)]:
         g.add_node(name, fn)
     g.add_edge(START, "recon")
-    for a, b in [("recon", "ap"), ("ap", "grc"), ("grc", "forecast"), ("forecast", "queue"), ("queue", "roi")]:
+    for a, b in [("recon", "ap"), ("ap", "grc"), ("grc", "forecast"), ("forecast", "queue"),
+                 ("queue", "policy"), ("policy", "roi")]:
         g.add_edge(a, b)
     g.add_edge("roi", END)
     return g.compile()

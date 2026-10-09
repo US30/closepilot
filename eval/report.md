@@ -36,7 +36,18 @@ IsolationForest (advisory): 28 flagged, 23 are injected anomalies (82%). Rule ch
 
 Selected: receipts=AutoETS, payments=WindowAverage. Selection uses the same holdout, so the selected WAPE is optimistic.
 
+## Policy RAG (30 clauses, 26 gold questions)
+
+| retrieval   |   questions | hit_at_1   | hit_at_3   |   mrr | queue_kinds_cited_correctly   |
+|:------------|------------:|:-----------|:-----------|------:|:------------------------------|
+| lexical     |          26 | 18/26      | 23/26      | 0.769 | 9/14                          |
+| hybrid      |          26 | 22/26      | 25/26      | 0.913 | 14/14                         |
+
+lexical = TF-IDF only (offline). hybrid = TF-IDF + Gemini embeddings, reciprocal rank fusion. A row labelled lexical in a run with the LLM on means the embedding API failed. The policy documents and the gold questions were written by the same author, so this is a sanity check.
+
 ## Text-to-SQL (25 gold questions)
 
 - Reference SQL executes: 25/25
-- LLM accuracy: not run (no GOOGLE_API_KEY or --no-llm)
+- Model: `gemini-3.5-flash`; questions 16-25; answered by API: 10/10 (0 API errors)
+- Strict result-set accuracy (answered): **9/10**
+- Lenient (extra columns allowed): **10/10**
